@@ -9,7 +9,7 @@ const qrcode = require("qrcode-terminal");
 const fs = require("fs");
 const { exec } = require("child_process");
 const ytdlp = require("yt-dlp-exec");
-const axios = require("axios");
+const yts = require("yt-search");
 
 // ===== CONFIG =====
 const OWNER_NUMBER = "558781319168";
@@ -20,6 +20,7 @@ const COMMAND_PREFIX = "☆";
 let adminsBot = [];
 let banY = {};
 let banF = {};
+let downloadingUsers = {}; // Controlar downloads simultâneos
 
 // ===== FUNÇÕES AUXILIARES =====
 function getPureNumber(id) {
@@ -83,33 +84,35 @@ async function createSticker(sock, msg) {
     }
 }
 
-// ===== BUSCAR VIDEO NO YOUTUBE =====
-async function searchYouTube(query) {
+// ===== YOUTUBE SEARCH & DOWNLOAD =====
+async function downloadAudio(sock, groupId, searchText, sender) {
     try {
-        const searchUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
-        
-        // Usar yt-dlp para buscar
-        const result = await ytdlp(`ytsearch:${query}`, {
-            dumpSingleJson: true,
-            noWarnings: true,
-            quiet: true
-        });
-
-        if (result && result.entries && result.entries.length > 0) {
-            return result.entries[0].webpage_url;
+        // Verificar se o usuário já está baixando
+        if (downloadingUsers[sender]) {
+            return sock.sendMessage(groupId, {
+                text: "⏳ Você já está baixando algo! Aguarde..."
+            });
         }
 
-        return null;
-    } catch (e) {
-        console.error("Erro ao buscar YouTube:", e.message);
-        return null;
-    }
-}
+        downloadingUsers[sender] = true;
 
-// ===== YOUTUBE DOWNLOADER =====
-async function downloadAudio(sock, groupId, url) {
-    try {
-        await sock.sendMessage(groupId, { text: "⏳ Baixando áudio..." });
+        await sock.sendMessage(groupId, { text: "🔍 Buscando no YouTube..." });
+
+        const results = await yts(searchText);
+        
+        if (!results || results.videos.length === 0) {
+            delete downloadingUsers[sender];
+            return sock.sendMessage(groupId, {
+                text: "❌ Nenhum resultado encontrado para: " + searchText
+            });
+        }
+
+        const video = results.videos[0];
+        const url = video.url;
+
+        await sock.sendMessage(groupId, { 
+            text: `⏳ Baixando: *${video.title}*\n🎤 Canal: ${video.author.name}\n⏱️ Duração: ${video.timestamp}` 
+        });
 
         const output = "./downloads/%(title)s.%(ext)s";
         
@@ -130,6 +133,7 @@ async function downloadAudio(sock, groupId, url) {
         const audioFile = files.find(f => f.endsWith(".mp3"));
 
         if (!audioFile) {
+            delete downloadingUsers[sender];
             return sock.sendMessage(groupId, {
                 text: "❌ Erro ao encontrar o arquivo baixado!"
             });
@@ -138,7 +142,19 @@ async function downloadAudio(sock, groupId, url) {
         const filePath = `./downloads/${audioFile}`;
         const fileSize = fs.statSync(filePath).size;
 
-        // Limite
+        // Verificar tamanho mínimo (arquivo corrompido)
+        if (fileSize < 100 * 1024) {
+            fs.unlinkSync(filePath);
+            delete downloadingUsers[sender];
+            return sock.sendMessage(groupId, {
+                text: "❌ Arquivo corrompido ou muito pequeno!"
+            });
+        }
+
+        // Limite máximo de 100MB para WhatsApp
+        if (fileSize > 100 * 1024 * 1024) {
+            fs.unlinkSync(filePath);
+            delete downloadingUsers[sender];
             return sock.sendMessage(groupId, {
                 text: "❌ Áudio muito grande (máximo 100MB)!"
             });
@@ -150,18 +166,45 @@ async function downloadAudio(sock, groupId, url) {
         });
 
         fs.unlinkSync(filePath);
+        delete downloadingUsers[sender];
 
     } catch (e) {
         console.error("❌ Erro ao baixar áudio:", e.message);
+        delete downloadingUsers[sender];
         return sock.sendMessage(groupId, {
-            text: `❌ Erro ao baixar áudio: ${e.message}`
+            text: `❌ Erro ao baixar: Tente outro termo de busca`
         });
     }
 }
 
-async function downloadVideo(sock, groupId, url) {
+async function downloadVideo(sock, groupId, searchText, sender) {
     try {
-        await sock.sendMessage(groupId, { text: "⏳ Baixando vídeo..." });
+        // Verificar se o usuário já está baixando
+        if (downloadingUsers[sender]) {
+            return sock.sendMessage(groupId, {
+                text: "⏳ Você já está baixando algo! Aguarde..."
+            });
+        }
+
+        downloadingUsers[sender] = true;
+
+        await sock.sendMessage(groupId, { text: "🔍 Buscando no YouTube..." });
+
+        const results = await yts(searchText);
+        
+        if (!results || results.videos.length === 0) {
+            delete downloadingUsers[sender];
+            return sock.sendMessage(groupId, {
+                text: "❌ Nenhum resultado encontrado para: " + searchText
+            });
+        }
+
+        const video = results.videos[0];
+        const url = video.url;
+
+        await sock.sendMessage(groupId, { 
+            text: `⏳ Baixando: *${video.title}*\n📺 Canal: ${video.author.name}\n⏱️ Duração: ${video.timestamp}` 
+        });
 
         const output = "./downloads/%(title)s.%(ext)s";
         
@@ -180,6 +223,7 @@ async function downloadVideo(sock, groupId, url) {
         const videoFile = files.find(f => f.endsWith(".mp4"));
 
         if (!videoFile) {
+            delete downloadingUsers[sender];
             return sock.sendMessage(groupId, {
                 text: "❌ Erro ao encontrar o arquivo baixado!"
             });
@@ -188,9 +232,19 @@ async function downloadVideo(sock, groupId, url) {
         const filePath = `./downloads/${videoFile}`;
         const fileSize = fs.statSync(filePath).size;
 
-        // Limite de 100MB para WhatsApp
+        // Verificar tamanho mínimo (arquivo corrompido)
+        if (fileSize < 500 * 1024) {
+            fs.unlinkSync(filePath);
+            delete downloadingUsers[sender];
+            return sock.sendMessage(groupId, {
+                text: "❌ Arquivo corrompido ou muito pequeno!"
+            });
+        }
+
+        // Limite máximo de 100MB para WhatsApp
         if (fileSize > 100 * 1024 * 1024) {
             fs.unlinkSync(filePath);
+            delete downloadingUsers[sender];
             return sock.sendMessage(groupId, {
                 text: "❌ Vídeo muito grande (máximo 100MB)!"
             });
@@ -202,11 +256,13 @@ async function downloadVideo(sock, groupId, url) {
         });
 
         fs.unlinkSync(filePath);
+        delete downloadingUsers[sender];
 
     } catch (e) {
         console.error("❌ Erro ao baixar vídeo:", e.message);
+        delete downloadingUsers[sender];
         return sock.sendMessage(groupId, {
-            text: `❌ Erro ao baixar vídeo: ${e.message}`
+            text: `❌ Erro ao baixar: Tente outro termo de busca`
         });
     }
 }
@@ -293,47 +349,25 @@ async function handleSticker(sock, msg) {
 }
 
 async function handlePly(sock, msg, groupId, sender, senderNum, mentioned, args) {
-    if (args.length < 2) {
+    if (!args[1]) {
         return sock.sendMessage(groupId, {
-            text: "❌ Use: ☆PLY <nome da música>"
+            text: "❌ Use: ☆PLY (texto da busca)\nExemplo: ☆PLY música relaxante"
         });
     }
 
-    const query = args.slice(1).join(" ");
-    
-    await sock.sendMessage(groupId, { text: "🔍 Procurando no YouTube..." });
-
-    const url = await searchYouTube(query);
-
-    if (!url) {
-        return sock.sendMessage(groupId, {
-            text: "❌ Nenhum resultado encontrado!"
-        });
-    }
-
-    return downloadAudio(sock, groupId, url);
+    const searchText = args.slice(1).join(" ");
+    return downloadAudio(sock, groupId, searchText, sender);
 }
 
 async function handleVly(sock, msg, groupId, sender, senderNum, mentioned, args) {
-    if (args.length < 2) {
+    if (!args[1]) {
         return sock.sendMessage(groupId, {
-            text: "❌ Use: ☆VLY <nome do vídeo>"
+            text: "❌ Use: ☆VLY (texto da busca)\nExemplo: ☆VLY animação do feliz"
         });
     }
 
-    const query = args.slice(1).join(" ");
-    
-    await sock.sendMessage(groupId, { text: "🔍 Procurando no YouTube..." });
-
-    const url = await searchYouTube(query);
-
-    if (!url) {
-        return sock.sendMessage(groupId, {
-            text: "❌ Nenhum resultado encontrado!"
-        });
-    }
-
-    return downloadVideo(sock, groupId, url);
+    const searchText = args.slice(1).join(" ");
+    return downloadVideo(sock, groupId, searchText, sender);
 }
 
 async function handleBan(sock, msg, groupId, sender, senderNum, mentioned) {
